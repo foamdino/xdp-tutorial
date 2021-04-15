@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/bpf.h>
 #include <linux/in.h>
+#include <linux/udp.h>
+#include <linux/tcp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -11,24 +13,40 @@
 #include "../common/xdp_stats_kern_user.h"
 #include "../common/xdp_stats_kern.h"
 
+#define odbpf_vdebug(fmt, args...) \
+({char ____fmt[] = fmt; bpf_trace_printk(____fmt, sizeof(____fmt), ##args); })
+
+#define odbpf_debug(fmt, args...) odbpf_vdebug(fmt "\n", ##args)
+
 /* Pops the outermost VLAN tag off the packet. Returns the popped VLAN ID on
  * success or -1 on failure.
  */
 static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
 {
-	/*
-	void *data_end = (void *)(long)ctx->data_end;
-	struct ethhdr eth_cpy;
-	struct vlan_hdr *vlh;
-	__be16 h_proto;
-	*/
+	
+	// void *data_end = (void *)(long)ctx->data_end;
+	// struct ethhdr eth_cpy;
+	// struct vlan_hdr *vlh;
+	// __be16 h_proto;
+
 	int vlid = -1;
 
-	/* Check if there is a vlan tag to pop */
+	// /* Check if there is a vlan tag to pop */
+	// if (!proto_is_vlan(h_proto)) {
+	// 	odbpf_debug("does not contain a vlan tag");
+	// 	return vlid;
+	// }
 
-	/* Still need to do bounds checking */
+	// /* Still need to do bounds checking */
+	// vlh = nh->pos;
+	// int vlanhdr_size = sizeof(*vlh);
+	// if (nh->pos + vlanhdr_size > data_end) {
+	// 	return -1;
+	// }
 
-	/* Save vlan ID for returning, h_proto for updating Ethernet header */
+	// /* Save vlan ID for returning, h_proto for updating Ethernet header */
+	// vlh->h_vlan_TCI;
+
 
 	/* Make a copy of the outer Ethernet header before we cut it off */
 
@@ -57,6 +75,52 @@ static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 SEC("xdp_port_rewrite")
 int xdp_port_rewrite_func(struct xdp_md *ctx)
 {
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	struct hdr_cursor nh;
+	struct ethhdr *eth;
+	int nh_type;
+	nh.pos = data;
+
+	nh_type = parse_ethhdr(&nh, data_end, &eth);
+
+	if (nh_type == bpf_htons(ETH_P_IPV6)) {
+		odbpf_debug("nh_type is ipv6");
+		struct ipv6hdr *ip6h;
+		nh_type = parse_ip6hdr(&nh, data_end, &ip6h);
+		goto handle_protocol;
+	} else if (nh_type == bpf_htons(ETH_P_IP)) {
+		odbpf_debug("nh_type is ipv4");
+		struct iphdr *iph;
+		nh_type = parse_iphdr(&nh, data_end, &iph);
+		goto handle_protocol;
+	} else {
+		goto end;
+	}
+
+handle_protocol:
+	if (nh_type == IPPROTO_UDP) {
+		odbpf_debug("udp found");
+		struct udphdr *udph;
+		int res = parse_udphdr(&nh, data_end, &udph);
+		odbpf_debug("parsed udphdr: %d", res);
+		if (res == -1) {
+			odbpf_debug("parsing udp failed");
+			return XDP_ABORTED;
+		}
+		udph->dest = bpf_htons(bpf_ntohs(udph->dest) - 1);
+	} else if (nh_type == IPPROTO_TCP) {
+		odbpf_debug("tcp found");
+		struct tcphdr *tcph;
+		int res = parse_tcphdr(&nh, data_end, &tcph);
+		if (res == -1) {
+			odbpf_debug("parsing tcp failed");
+			return XDP_ABORTED;
+		}
+		tcph->dest = bpf_htons(bpf_ntohs(tcph->dest) - 1);
+	}
+
+end:
 	return XDP_PASS;
 }
 
