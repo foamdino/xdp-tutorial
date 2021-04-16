@@ -71,6 +71,33 @@ static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 	return 0;
 }
 
+static __always_inline int handle_protocol(struct hdr_cursor *nh,
+											int nh_type,
+											void *data_end)
+{
+	if (nh_type == IPPROTO_UDP) {
+		odbpf_debug("handle_protocol: udp found");
+		struct udphdr *udph;
+		int res = parse_udphdr(nh, data_end, &udph);
+		odbpf_debug("parsed udphdr: %d", res);
+		if (res == -1) {
+			odbpf_debug("handle_protocol: parsing udp failed");
+			return XDP_ABORTED;
+		}
+		udph->dest = bpf_htons(bpf_ntohs(udph->dest) - 1);
+	} else if (nh_type == IPPROTO_TCP) {
+		odbpf_debug("handle_protocol: tcp found");
+		struct tcphdr *tcph;
+		int res = parse_tcphdr(nh, data_end, &tcph);
+		if (res == -1) {
+			odbpf_debug("handle_protocol: parsing tcp failed");
+			return XDP_ABORTED;
+		}
+		tcph->dest = bpf_htons(bpf_ntohs(tcph->dest) - 1);
+	}
+	return XDP_PASS;
+}
+
 /* Implement assignment 1 in this section */
 SEC("xdp_port_rewrite")
 int xdp_port_rewrite_func(struct xdp_md *ctx)
@@ -88,40 +115,15 @@ int xdp_port_rewrite_func(struct xdp_md *ctx)
 		odbpf_debug("nh_type is ipv6");
 		struct ipv6hdr *ip6h;
 		nh_type = parse_ip6hdr(&nh, data_end, &ip6h);
-		goto handle_protocol;
 	} else if (nh_type == bpf_htons(ETH_P_IP)) {
 		odbpf_debug("nh_type is ipv4");
 		struct iphdr *iph;
 		nh_type = parse_iphdr(&nh, data_end, &iph);
-		goto handle_protocol;
 	} else {
-		goto end;
+		return XDP_PASS; // can't handle
 	}
 
-handle_protocol:
-	if (nh_type == IPPROTO_UDP) {
-		odbpf_debug("udp found");
-		struct udphdr *udph;
-		int res = parse_udphdr(&nh, data_end, &udph);
-		odbpf_debug("parsed udphdr: %d", res);
-		if (res == -1) {
-			odbpf_debug("parsing udp failed");
-			return XDP_ABORTED;
-		}
-		udph->dest = bpf_htons(bpf_ntohs(udph->dest) - 1);
-	} else if (nh_type == IPPROTO_TCP) {
-		odbpf_debug("tcp found");
-		struct tcphdr *tcph;
-		int res = parse_tcphdr(&nh, data_end, &tcph);
-		if (res == -1) {
-			odbpf_debug("parsing tcp failed");
-			return XDP_ABORTED;
-		}
-		tcph->dest = bpf_htons(bpf_ntohs(tcph->dest) - 1);
-	}
-
-end:
-	return XDP_PASS;
+	return handle_protocol(&nh, nh_type, data_end);
 }
 
 /* VLAN swapper; will pop outermost VLAN tag if it exists, otherwise push a new
